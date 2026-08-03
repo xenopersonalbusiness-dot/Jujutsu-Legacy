@@ -595,12 +595,6 @@ local function TweenTo(targetCFrame)
     return true
 end
 
-local function GetTeleportNPC()
-    local npc2 = Workspace:FindFirstChild("Npc2")
-    if npc2 then local children = npc2:GetChildren() if #children >= 14 then return children[14] end end
-    return nil
-end
-
 local function GetAllAreaTeleportNPCs()
     local npcs = {}
     local npc2 = Workspace:FindFirstChild("Npc2")
@@ -945,7 +939,13 @@ local function AutoFarmLoop()
             local statsFolder = LocalPlayer:FindFirstChild("Stats")
             local playerLevel = statsFolder and statsFolder:FindFirstChild("Level") and statsFolder.Level.Value or 0
             if playerLevel >= 100 then
-                local tpNPC = GetTeleportNPC()
+                -- Npc2 has other unrelated children (e.g. ClanSpin) mixed in among the actual
+                -- area teleporters, and GetChildren() order isn't stable (depends on streaming/
+                -- load order), so picking one by position is unreliable and can grab the wrong
+                -- NPC. Match by the "Teleport" name prefix + Level/LevelMax attributes instead,
+                -- same as the generic area-teleport fallback below - this can't select ClanSpin.
+                local areaNpcs = GetAllAreaTeleportNPCs()
+                local tpNPC = GetLevelMatchedAreaTeleportNPC(playerLevel, areaNpcs)
                 local tpPart = tpNPC and (tpNPC:FindFirstChild("HumanoidRootPart") or tpNPC:FindFirstChild("Torso") or tpNPC:FindFirstChildWhichIsA("BasePart", true))
                 if not tpPart then
                     -- Npc2's teleporter may not have streamed in yet; fall back to the known
