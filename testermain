@@ -14,7 +14,6 @@ local IsMainGame = PlaceId == 15694107053
 local IsRaidGame = PlaceId == 18795268508 or PlaceId == 17889317592
 
 if not IsMainGame and not IsRaidGame then
-    warn("[AutoFarmHub] Unrecognized PlaceId, GUI not loaded: " .. tostring(PlaceId))
     return
 end
 
@@ -24,8 +23,7 @@ local ExistingGui = PlayerGui:FindFirstChild("AutoFarmHubGui")
 if ExistingGui then
     ExistingGui:Destroy()
 end
--- Global-service connections (e.g. UserInputService) outlive Destroy()'d GUI instances,
--- so they must be disconnected explicitly or they pile up (and slow down) every reload.
+-- disconnect global-service connections (they outlive Destroy()'d GUI instances)
 if getgenv().AutoFarmHubGlobalConnections then
     for _, conn in pairs(getgenv().AutoFarmHubGlobalConnections) do
         pcall(function() conn:Disconnect() end)
@@ -40,6 +38,7 @@ getgenv().AutoFarmHubRunning = true
 local isRunning = false
 local isAutoMoves = false
 local isAutoUseDrops = false
+local isAutoStats = false
 local isSelectiveFarming = false
 local isRaidFarming = false
 local farmLoopActive = false
@@ -62,7 +61,7 @@ local statMap = {
     ["Defense"] = "Defensive",
     ["Melee"] = "Melee"
 }
-local selectedStats = {"Curse Energy", "Defense"} -- Default
+local selectedStats = {}
 
 --// UI References
 local FarmToggle = nil
@@ -298,7 +297,6 @@ local function MakeDragable(frame, onClickCallback)
     local isMoving = false
     local releaseConn = nil
 
-    -- Start drag ONLY when clicking the frame itself
     frame.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
             dragging = true
@@ -306,13 +304,11 @@ local function MakeDragable(frame, onClickCallback)
             dragStart = input.Position
             startPos = frame.Position
 
-            -- Disconnect any stale listener from a previous press before making a new one
             if releaseConn then
                 releaseConn:Disconnect()
                 releaseConn = nil
             end
 
-            -- Detect when THIS specific click is released
             releaseConn = input.Changed:Connect(function()
                 if input.UserInputState == Enum.UserInputState.End then
                     dragging = false
@@ -320,7 +316,6 @@ local function MakeDragable(frame, onClickCallback)
                         releaseConn:Disconnect()
                         releaseConn = nil
                     end
-                    -- If we didn't drag it far, treat as a click
                     if not isMoving and onClickCallback then
                         onClickCallback()
                     end
@@ -329,14 +324,12 @@ local function MakeDragable(frame, onClickCallback)
         end
     end)
 
-    -- Track mouse movements over the frame to update dragInput
     frame.InputChanged:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
             dragInput = input
         end
     end)
 
-    -- Use UserInputService for the actual movement so it doesn't lag when mouse leaves the frame
     local globalConn = UserInputService.InputChanged:Connect(function(input)
         if input == dragInput and dragging then
             local delta = input.Position - dragStart
@@ -509,9 +502,6 @@ local function EquipToolByName(toolName)
     if not toolName then return end
     local Character = LocalPlayer.Character
     if not Character then return end
-    -- Must specifically be an equipped Tool named toolName - a plain FindFirstChild(name, true)
-    -- can false-positive on any unrelated descendant (rig part, animation, script) that happens
-    -- to share the name, which was silently blocking re-equips.
     local equippedTool = Character:FindFirstChildOfClass("Tool")
     if equippedTool and equippedTool.Name == toolName then return end
     local Backpack = LocalPlayer:FindFirstChildWhichIsA("Backpack")
@@ -595,7 +585,17 @@ local function TweenTo(targetCFrame)
     return true
 end
 
+-- forces nearby world content to stream in before a lookup runs
+local function EnsureStreamedAroundPlayer()
+    local Character = LocalPlayer.Character
+    local HRP = Character and Character:FindFirstChild("HumanoidRootPart")
+    if HRP and typeof(LocalPlayer.RequestStreamAroundAsync) == "function" then
+        pcall(function() LocalPlayer:RequestStreamAroundAsync(HRP.Position, 3) end)
+    end
+end
+
 local function GetAllAreaTeleportNPCs()
+    EnsureStreamedAroundPlayer()
     local npcs = {}
     local npc2 = Workspace:FindFirstChild("Npc2")
     if npc2 then
@@ -621,6 +621,7 @@ local function GetLevelMatchedAreaTeleportNPC(playerLevel, npcs)
 end
 
 local function GetBestQuestInfo()
+    EnsureStreamedAroundPlayer()
     local statsFolder = LocalPlayer:FindFirstChild("Stats")
     if not statsFolder or not statsFolder:FindFirstChild("Level") then return nil, 0, nil end
     local playerLevel = tonumber(statsFolder.Level.Value) or 0
@@ -658,6 +659,7 @@ local function GetBestQuestInfo()
 end
 
 local function FindMobByFilter(filterFn)
+    EnsureStreamedAroundPlayer()
     local validMobs = {}
     local enemiesFolder = Workspace:FindFirstChild("Enemies")
     if enemiesFolder then
@@ -681,7 +683,7 @@ local function FindSelectiveTargetMob(mobNames) return FindMobByFilter(function(
 local function PowerSpamLoop()
     local statIndex = 1
     while task.wait(0.1) and getgenv().AutoFarmHubRunning do
-        if #selectedStats > 0 then
+        if isAutoStats and #selectedStats > 0 then
             pcall(function()
                 local powerRemote = ReplicatedStorage:FindFirstChild("Remotes") and ReplicatedStorage.Remotes:FindFirstChild("IncrementPower")
                 if powerRemote then
@@ -893,8 +895,6 @@ local function FightMobLoop(mob, runningFlag)
         local myHRP = myChar and myChar:FindFirstChild("HumanoidRootPart")
         local myHum = myChar and myChar:FindFirstChildOfClass("Humanoid")
         if not myChar or not myHRP or not myHum or myHum.Health <= 0 then break end
-        -- The tool can get unequipped mid-fight (game-side quirks, animations, etc);
-        -- re-check periodically instead of only once at the start of the fight.
         equipCheckElapsed = equipCheckElapsed + 0.15
         if equipCheckElapsed >= 1 then
             equipCheckElapsed = 0
@@ -915,7 +915,7 @@ end
 --// Main Farm Loop
 local function AutoFarmLoop()
     if farmLoopActive then return end farmLoopActive = true
-    local ok, err = pcall(function()
+    pcall(function()
         while isRunning or isSelectiveFarming do
             task.wait(0.5)
             if not getgenv().AutoFarmHubRunning then break end
@@ -939,17 +939,10 @@ local function AutoFarmLoop()
             local statsFolder = LocalPlayer:FindFirstChild("Stats")
             local playerLevel = statsFolder and statsFolder:FindFirstChild("Level") and statsFolder.Level.Value or 0
             if playerLevel >= 100 then
-                -- Npc2 has other unrelated children (e.g. ClanSpin) mixed in among the actual
-                -- area teleporters, and GetChildren() order isn't stable (depends on streaming/
-                -- load order), so picking one by position is unreliable and can grab the wrong
-                -- NPC. Match by the "Teleport" name prefix + Level/LevelMax attributes instead,
-                -- same as the generic area-teleport fallback below - this can't select ClanSpin.
                 local areaNpcs = GetAllAreaTeleportNPCs()
                 local tpNPC = GetLevelMatchedAreaTeleportNPC(playerLevel, areaNpcs)
                 local tpPart = tpNPC and (tpNPC:FindFirstChild("HumanoidRootPart") or tpNPC:FindFirstChild("Torso") or tpNPC:FindFirstChildWhichIsA("BasePart", true))
                 if not tpPart then
-                    -- Npc2's teleporter may not have streamed in yet; fall back to the known
-                    -- level-100 quest giver so the character isn't stuck waiting on streaming.
                     local quest7 = Workspace:FindFirstChild("QuestGivers") and Workspace.QuestGivers:FindFirstChild("Quest 7")
                     if quest7 then
                         tpNPC = quest7
@@ -967,7 +960,6 @@ local function AutoFarmLoop()
             local targetValue = questFolder and questFolder:FindFirstChild("Target")
             local targetName = targetValue and targetValue.Value
             local bestQuestMarker, bestStartLevel, bestQuestNPC = GetBestQuestInfo()
-            if not bestQuestMarker and not bestQuestNPC then warn("[AutoFarmHub] No marker/NPC matched for current level") end
             if targetName ~= "" and targetName ~= nil then
                 if bestStartLevel > lastPickedStartLevel then
                     pcall(function() local cancelRemote = ReplicatedStorage:FindFirstChild("Quest") and ReplicatedStorage.Quest:FindFirstChild("CancelQuest") if cancelRemote then cancelRemote:FireServer() end end)
@@ -1001,7 +993,6 @@ local function AutoFarmLoop()
                     if teleportTarget then
                         local tpPart = teleportTarget:FindFirstChild("HumanoidRootPart") or teleportTarget:FindFirstChild("Torso") or teleportTarget:FindFirstChildWhichIsA("BasePart", true)
                         if tpPart then
-                            warn("[AutoFarmHub] No quest target in this area, going to " .. teleportTarget.Name)
                             TweenTo(tpPart.CFrame * CFrame.new(0, 0, 3))
                             if not isRunning then break end
                             local prompt = tpPart:FindFirstChild("ProximityPrompt") or teleportTarget:FindFirstChildWhichIsA("ProximityPrompt", true)
@@ -1016,7 +1007,6 @@ local function AutoFarmLoop()
         end
     end)
     farmLoopActive = false
-    if not ok then warn("[AutoFarmHub] AutoFarmLoop error: " .. tostring(err)) end
 end
 
 --// Raid Farm Loop
@@ -1024,7 +1014,7 @@ local function FindAnyRaidMob() return FindMobByFilter(function(name) return tru
 
 local function RaidFarmLoop()
     if farmLoopActive then return end farmLoopActive = true
-    local ok, err = pcall(function()
+    pcall(function()
         while isRaidFarming do
             task.wait(0.5)
             if not getgenv().AutoFarmHubRunning then break end
@@ -1043,7 +1033,6 @@ local function RaidFarmLoop()
             if mob then FightMobLoop(mob, function() return isRaidFarming end) else task.wait(1) end
         end
     end)
-    if not ok then warn("[AutoFarmHub] RaidFarmLoop error: " .. tostring(err)) end
     farmLoopActive = false
 end
 
@@ -1086,6 +1075,7 @@ do
 
     CreateToggle(FarmingPage, "Auto Moves", false, function(val) isAutoMoves = val end)
     CreateToggle(FarmingPage, "Auto Use Drops", false, function(val) isAutoUseDrops = val end)
+    CreateToggle(FarmingPage, "Auto Stats", false, function(val) isAutoStats = val end)
 
     local statOptions = {"Curse Energy", "Sword", "Defense", "Melee"}
     for _, statName in pairs(statOptions) do
