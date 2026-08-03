@@ -615,31 +615,58 @@ local function GetAllAreaTeleportNPCs()
     return npcs
 end
 
--- any Npc2 entry with a prompt is a viable area transition, plus the level-100 quest giver
-local function GetTeleportCandidates()
-    EnsureStreamedAroundPlayer()
-    local candidates = {}
-    local seen = {}
-    local function add(obj)
-        if obj and not seen[obj] and obj:FindFirstChildWhichIsA("ProximityPrompt", true) then
-            seen[obj] = true
-            table.insert(candidates, obj)
-        end
+-- reads the Level/LevelMax bracket an object gates on, falling back to its prompt attributes
+local function GetLevelRange(obj)
+    local levelVal = obj:FindFirstChild("Level")
+    local maxLevelVal = obj:FindFirstChild("LevelMax")
+    local reqLevel = levelVal and tonumber(levelVal.Value)
+    local maxLevel = maxLevelVal and tonumber(maxLevelVal.Value)
+    if not reqLevel then
+        local prompt = obj:FindFirstChildWhichIsA("ProximityPrompt", true)
+        if prompt then reqLevel = tonumber(prompt:GetAttribute("LevelReq") or prompt:GetAttribute("Level")) end
     end
+    return reqLevel, maxLevel
+end
+
+-- true / false when the object states a bracket, nil when it states nothing
+local function MatchesLevel(obj, playerLevel)
+    local reqLevel, maxLevel = GetLevelRange(obj)
+    if not reqLevel then return nil end
+    if playerLevel < reqLevel then return false end
+    if maxLevel and playerLevel >= maxLevel then return false end
+    return true
+end
+
+-- nearest prompt-bearing transition the player's level actually qualifies for. Objects that
+-- state a bracket and fail it are never eligible; unstated ones are a last resort, and quest
+-- givers must match explicitly so low levels are never routed to high-level questlines.
+local function GetNearestTeleportTarget(position, playerLevel)
+    local matched, unknown = {}, {}
+    local seen = {}
+    local function consider(obj, requireExplicit)
+        if not obj or seen[obj] then return end
+        if not obj:FindFirstChildWhichIsA("ProximityPrompt", true) then return end
+        seen[obj] = true
+        local ok = MatchesLevel(obj, playerLevel)
+        if ok == true then table.insert(matched, obj)
+        elseif ok == nil and not requireExplicit then table.insert(unknown, obj) end
+    end
+
+    EnsureStreamedAroundPlayer()
     local npc2 = Workspace:FindFirstChild("Npc2")
     if npc2 then
         local children = npc2:GetChildren()
-        add(children[19])
-        for _, child in pairs(children) do add(child) end
+        consider(children[19], false)
+        for _, child in pairs(children) do consider(child, false) end
     end
     local questGivers = Workspace:FindFirstChild("QuestGivers")
-    if questGivers then add(questGivers:FindFirstChild("Quest 7")) end
-    return candidates
-end
+    if questGivers then
+        for _, npc in pairs(questGivers:GetChildren()) do consider(npc, true) end
+    end
 
-local function GetNearestTeleportTarget(position)
+    local pool = #matched > 0 and matched or unknown
     local bestObj, bestPart, bestDist
-    for _, obj in pairs(GetTeleportCandidates()) do
+    for _, obj in pairs(pool) do
         local part = GetPivotPart(obj)
         if part then
             local dist = (position - part.Position).Magnitude
@@ -993,7 +1020,7 @@ local function AutoFarmLoop()
             local targetObj = GetLevelMatchedAreaTeleportNPC(playerLevel, GetAllAreaTeleportNPCs())
             local targetPart = GetPivotPart(targetObj)
             if not targetPart then
-                targetObj, targetPart = GetNearestTeleportTarget(hrp.Position)
+                targetObj, targetPart = GetNearestTeleportTarget(hrp.Position, playerLevel)
             end
             if not targetPart then task.wait(3) return end
 
