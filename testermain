@@ -589,9 +589,10 @@ end
 local function EnsureStreamedAroundPlayer()
     local Character = LocalPlayer.Character
     local HRP = Character and Character:FindFirstChild("HumanoidRootPart")
-    if HRP and typeof(LocalPlayer.RequestStreamAroundAsync) == "function" then
-        pcall(function() LocalPlayer:RequestStreamAroundAsync(HRP.Position, 3) end)
-    end
+    if not HRP then return end
+    pcall(function()
+        LocalPlayer:RequestStreamAroundAsync(HRP.Position, 3)
+    end)
 end
 
 local function GetAllAreaTeleportNPCs()
