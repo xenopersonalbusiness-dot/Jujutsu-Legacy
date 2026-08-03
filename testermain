@@ -39,6 +39,7 @@ local isRunning = false
 local isAutoMoves = false
 local isAutoUseDrops = false
 local isAutoStats = false
+local isDisableVFX = false
 local isSelectiveFarming = false
 local isRaidFarming = false
 local farmLoopActive = false
@@ -78,6 +79,7 @@ local Featureslist = Instance.new("Frame")
 local Tabs = Instance.new("Frame")
 local FarmingTabButton = Instance.new("TextButton")
 local UsefulTabButton = Instance.new("TextButton")
+local SettingsTabButton = Instance.new("TextButton")
 local Credits = Instance.new("TextLabel")
 local UICorner_3 = Instance.new("UICorner")
 
@@ -160,6 +162,18 @@ ToggleText.TextColor3 = Color3.fromRGB(255, 255, 255)
 ToggleText.TextSize = 14.000
 ToggleText.TextStrokeTransparency = 0.000
 
+-- touch without a keyboard is the standard mobile signal; desktop is left untouched
+local IsMobile = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+if IsMobile then
+    local ContainerScale = Instance.new("UIScale")
+    ContainerScale.Scale = 0.65
+    ContainerScale.Parent = Container
+
+    local ToggleScale = Instance.new("UIScale")
+    ToggleScale.Scale = 0.65
+    ToggleScale.Parent = ToggleButton
+end
+
 -- Close Logic
 CloseButton.MouseButton1Click:Connect(function()
     Container.Visible = false
@@ -238,6 +252,19 @@ UsefulTabButton.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
 UsefulTabButton.TextStrokeTransparency = 0.000
 UsefulTabButton.LayoutOrder = 2
 
+SettingsTabButton.Name = "SettingsTabButton"
+SettingsTabButton.Parent = Tabs
+SettingsTabButton.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+SettingsTabButton.BackgroundTransparency = 1.000
+SettingsTabButton.Size = UDim2.new(1, -10, 0, 40)
+SettingsTabButton.Font = Enum.Font.FredokaOne
+SettingsTabButton.Text = "Settings"
+SettingsTabButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+SettingsTabButton.TextSize = 23.000
+SettingsTabButton.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+SettingsTabButton.TextStrokeTransparency = 0.000
+SettingsTabButton.LayoutOrder = 3
+
 UICorner_3.Parent = Tabs
 
 --// Custom GUI Logic Setup
@@ -274,11 +301,12 @@ end
 
 local FarmingPage = CreatePage("Farming")
 local UsefulPage = CreatePage("Useful")
+local SettingsPage = CreatePage("Settings")
 
 FarmingPage.Visible = true
 
-local TabButtons = {FarmingTabButton, UsefulTabButton}
-local TabPages = {FarmingPage, UsefulPage}
+local TabButtons = {FarmingTabButton, UsefulTabButton, SettingsTabButton}
+local TabPages = {FarmingPage, UsefulPage, SettingsPage}
 
 for i, btn in ipairs(TabButtons) do
     btn.MouseButton1Click:Connect(function()
@@ -517,6 +545,37 @@ local function EquipVessel(vesselName)
     if not vesselName or vesselName == "" then return end
     local Event = ReplicatedStorage:FindFirstChild("Remotes") and ReplicatedStorage.Remotes:FindFirstChild("VesselEquip")
     if Event then pcall(function() Event:FireServer(vesselName) end) end
+end
+
+-- VFX arrives as a server->client broadcast; suppressing it means silencing the listeners the
+-- game bound to that remote rather than dropping anything we send.
+local vfxConnections = {}
+
+local function GetVFXRemote()
+    local container = ReplicatedStorage:FindFirstChild("RemoteEvent")
+    return container and container:FindFirstChild("VFX")
+end
+
+local function SetVFXBlocked(blocked)
+    local remote = GetVFXRemote()
+    if not remote then return end
+
+    if blocked then
+        if typeof(getconnections) ~= "function" then return end
+        local ok, connections = pcall(getconnections, remote.OnClientEvent)
+        if not ok then return end
+        for _, connection in pairs(connections) do
+            if connection.Disable then
+                pcall(function() connection:Disable() end)
+                table.insert(vfxConnections, connection)
+            end
+        end
+    else
+        for _, connection in pairs(vfxConnections) do
+            if connection.Enable then pcall(function() connection:Enable() end) end
+        end
+        table.clear(vfxConnections)
+    end
 end
 
 local function GetUnequippedTools()
@@ -1199,6 +1258,12 @@ if IsMainGame then
     CreateInput(UsefulPage, "Vessel Name:", "", function(val) vesselValue = val end)
     CreateButton(UsefulPage, "Equip Vessel", function() EquipVessel(vesselValue) end)
 end
+
+-- Settings Page
+CreateToggle(SettingsPage, "Disable VFX", false, function(val)
+    isDisableVFX = val
+    SetVFXBlocked(val)
+end)
 
 --// Start Background Loops
 spawn(PowerSpamLoop)
