@@ -39,6 +39,7 @@ getgenv().AutoFarmHubRunning = true
 --// Script State
 local isRunning = false
 local isAutoMoves = false
+local isAutoUseDrops = false
 local isSelectiveFarming = false
 local isRaidFarming = false
 local farmLoopActive = false
@@ -63,13 +64,7 @@ local statMap = {
 }
 local selectedStats = {"Curse Energy", "Defense"} -- Default
 
---// Session System
-local sessionHonor = 0
-local sessionMoney = 0
-local sessionItemCounts = {}
-
 --// UI References
-local SessionLabel = nil
 local FarmToggle = nil
 local SelectiveFarmToggle = nil
 local SelectiveMobsFrame = nil
@@ -85,8 +80,6 @@ local Featureslist = Instance.new("Frame")
 local Tabs = Instance.new("Frame")
 local FarmingTabButton = Instance.new("TextButton")
 local UsefulTabButton = Instance.new("TextButton")
-local SessionTabButton = Instance.new("TextButton")
-local MiscTabButton = Instance.new("TextButton")
 local Credits = Instance.new("TextLabel")
 local UICorner_3 = Instance.new("UICorner")
 
@@ -247,32 +240,6 @@ UsefulTabButton.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
 UsefulTabButton.TextStrokeTransparency = 0.000
 UsefulTabButton.LayoutOrder = 2
 
-SessionTabButton.Name = "SessionTabButton"
-SessionTabButton.Parent = Tabs
-SessionTabButton.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-SessionTabButton.BackgroundTransparency = 1.000
-SessionTabButton.Size = UDim2.new(1, -10, 0, 40)
-SessionTabButton.Font = Enum.Font.FredokaOne
-SessionTabButton.Text = "Session"
-SessionTabButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-SessionTabButton.TextSize = 23.000
-SessionTabButton.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
-SessionTabButton.TextStrokeTransparency = 0.000
-SessionTabButton.LayoutOrder = 3
-
-MiscTabButton.Name = "MiscTabButton"
-MiscTabButton.Parent = Tabs
-MiscTabButton.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-MiscTabButton.BackgroundTransparency = 1.000
-MiscTabButton.Size = UDim2.new(1, -10, 0, 40)
-MiscTabButton.Font = Enum.Font.FredokaOne
-MiscTabButton.Text = "Misc"
-MiscTabButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-MiscTabButton.TextSize = 23.000
-MiscTabButton.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
-MiscTabButton.TextStrokeTransparency = 0.000
-MiscTabButton.LayoutOrder = 4
-
 UICorner_3.Parent = Tabs
 
 --// Custom GUI Logic Setup
@@ -309,13 +276,11 @@ end
 
 local FarmingPage = CreatePage("Farming")
 local UsefulPage = CreatePage("Useful")
-local SessionPage = CreatePage("Session")
-local MiscPage = CreatePage("Misc")
 
 FarmingPage.Visible = true
 
-local TabButtons = {FarmingTabButton, UsefulTabButton, SessionTabButton, MiscTabButton}
-local TabPages = {FarmingPage, UsefulPage, SessionPage, MiscPage}
+local TabButtons = {FarmingTabButton, UsefulTabButton}
+local TabPages = {FarmingPage, UsefulPage}
 
 for i, btn in ipairs(TabButtons) do
     btn.MouseButton1Click:Connect(function()
@@ -544,7 +509,11 @@ local function EquipToolByName(toolName)
     if not toolName then return end
     local Character = LocalPlayer.Character
     if not Character then return end
-    if Character:FindFirstChild(toolName, true) then return end
+    -- Must specifically be an equipped Tool named toolName - a plain FindFirstChild(name, true)
+    -- can false-positive on any unrelated descendant (rig part, animation, script) that happens
+    -- to share the name, which was silently blocking re-equips.
+    local equippedTool = Character:FindFirstChildOfClass("Tool")
+    if equippedTool and equippedTool.Name == toolName then return end
     local Backpack = LocalPlayer:FindFirstChildWhichIsA("Backpack")
     if Backpack then
         local tool = Backpack:FindFirstChild(toolName, true)
@@ -714,126 +683,6 @@ end
 local function FindTargetMob(targetName) return FindMobByFilter(function(name) return name == targetName end) end
 local function FindSelectiveTargetMob(mobNames) return FindMobByFilter(function(name) return table.find(mobNames, name) ~= nil end) end
 
--- GetInput is invoked BY THE SERVER (OnClientInvoke), asking the client what code was typed;
--- it is not something the client calls. We don't need to know *what* tells the server to ask
--- (a RemoteEvent buried anywhere, with any name) - we just need to trigger the game's own
--- already-connected handler the same way a real player would: type into the box and submit it.
--- Firing FocusLost(true) reproduces "typed text, pressed Enter" exactly, running whatever
--- internal logic the game wired to that box regardless of where its remote lives.
-local function FindRedeemBox(menu)
-    if not menu then return nil end
-    for _, obj in pairs(menu:GetDescendants()) do
-        if obj:IsA("TextBox") then return obj end
-    end
-    return nil
-end
-
-local function FindRedeemButton(menu, box)
-    if not menu then return nil end
-    local searchRoot = (box and box.Parent) or menu
-    for _, obj in pairs(searchRoot:GetDescendants()) do
-        if obj:IsA("TextButton") or obj:IsA("ImageButton") then
-            local label = (obj.Name .. " " .. (obj:IsA("TextButton") and obj.Text or "")):lower()
-            if label:find("redeem") or label:find("submit") or label:find("confirm") or label:find("enter") or label:find("send") or label:find("apply") then
-                return obj
-            end
-        end
-    end
-    return nil
-end
-
-local function FindRedeemRemote(menu)
-    local remotesFolder = ReplicatedStorage:FindFirstChild("Remotes")
-    if remotesFolder then
-        local candidates = {"RedeemCode", "Redeem", "SubmitCode", "CodeRedeem", "EnterCode", "RedeemButton"}
-        for _, name in ipairs(candidates) do
-            local r = remotesFolder:FindFirstChild(name)
-            if r and (r:IsA("RemoteEvent") or r:IsA("RemoteFunction")) then return r end
-        end
-    end
-    -- Also check right next to GetInput - per-menu remotes often live beside it, not centrally
-    if menu then
-        for _, obj in pairs(menu:GetDescendants()) do
-            if (obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction")) and obj.Name ~= "GetInput" then
-                local n = obj.Name:lower()
-                if n:find("redeem") or n:find("code") or n:find("submit") then return obj end
-            end
-        end
-    end
-    return nil
-end
-
-local function RedeemAllCodes()
-    local codesModule = ReplicatedStorage:FindFirstChild("Module") and ReplicatedStorage.Module:FindFirstChild("Codes")
-    if not codesModule then warn("[AutoFarmHub] Codes module not found at ReplicatedStorage.Module.Codes") return end
-
-    -- Reading .Source is blocked on injected scripts in modern Roblox (that's why it needs a
-    -- decompiler to even view). require()-ing the ModuleScript gets the exact same table it
-    -- returns, so the code list still auto-updates whenever the module changes.
-    local codes = {}
-    local ok, codesTable = pcall(require, codesModule)
-    if ok and typeof(codesTable) == "table" then
-        for codeName, fn in pairs(codesTable) do
-            if typeof(fn) == "function" then table.insert(codes, codeName) end
-        end
-    end
-    if #codes == 0 then warn("[AutoFarmHub] Could not auto-detect any codes") return end
-
-    local Profile = LocalPlayer.PlayerGui:FindFirstChild("Profile")
-    local Menu = Profile and Profile:FindFirstChild("Menu")
-    local Event = Menu and Menu:FindFirstChild("GetInput")
-    if not Event then
-        local success, remote = pcall(function()
-            return LocalPlayer.PlayerGui:WaitForChild("Profile", 10):WaitForChild("Menu", 10):WaitForChild("GetInput", 10)
-        end)
-        if success then Event = remote end
-    end
-    if not Event or not Event:IsA("RemoteFunction") then
-        warn("[AutoFarmHub] GetInput RemoteFunction not found at PlayerGui.Profile.Menu")
-        return
-    end
-
-    local box = FindRedeemBox(Menu)
-    local btn = FindRedeemButton(Menu, box)
-    local remote = FindRedeemRemote(Menu)
-    if not box and not btn and not remote then
-        warn("[AutoFarmHub] Could not find the code TextBox, a Redeem/Submit button, or a redeem remote under PlayerGui.Profile.Menu. Use your remote spy on a manual redeem to find what fires right before GetInput.OnClientInvoke gets called, then send me that path.")
-        return
-    end
-    if typeof(firesignal) ~= "function" and not remote then
-        warn("[AutoFarmHub] This executor doesn't expose firesignal and no redeem remote was found - can't simulate submission.")
-        return
-    end
-
-    local hasGetCallback = typeof(getcallbackvalue) == "function"
-    local originalCallback = hasGetCallback and getcallbackvalue(Event, "OnClientInvoke") or nil
-
-    for _, code in ipairs(codes) do
-        Event.OnClientInvoke = function() return code end
-        if box then
-            pcall(function() box.Text = code end)
-            -- Reproduce "typed the code, pressed Enter" - runs the game's own submit handler
-            -- whatever remote it internally fires, wherever that remote actually lives.
-            if typeof(firesignal) == "function" then
-                pcall(function() firesignal(box.FocusLost, true) end)
-            end
-        end
-        if btn and typeof(firesignal) == "function" then
-            pcall(function() firesignal(btn.MouseButton1Click) end)
-        end
-        if remote then
-            pcall(function()
-                if remote:IsA("RemoteEvent") then remote:FireServer() else remote:InvokeServer() end
-            end)
-        end
-        task.wait(1)
-    end
-
-    if hasGetCallback and originalCallback then
-        Event.OnClientInvoke = originalCallback
-    end
-end
-
 --// Independent Background Loops
 local function PowerSpamLoop()
     local statIndex = 1
@@ -870,6 +719,46 @@ local function AutoMovesLoop()
                     moveEvent:FireServer(selectedFarmingTool, "UseC") task.wait(0.2)
                     moveEvent:FireServer(selectedFarmingTool, "UseV")
                 end
+            end)
+        end
+    end
+end
+
+local function GetDropTools()
+    local drops = {}
+    local Backpack = LocalPlayer:FindFirstChildWhichIsA("Backpack")
+    if Backpack then
+        for _, item in pairs(Backpack:GetChildren()) do
+            if item:IsA("Tool") then
+                local canStore = item:FindFirstChild("CanStore")
+                if canStore and canStore:IsA("BoolValue") and canStore.Value then
+                    table.insert(drops, item)
+                end
+            end
+        end
+    end
+    return drops
+end
+
+local function AutoUseDropsLoop()
+    while task.wait(1) and getgenv().AutoFarmHubRunning do
+        if isAutoUseDrops then
+            pcall(function()
+                local drops = GetDropTools()
+                if #drops == 0 then return end
+                local Character = LocalPlayer.Character
+                local Humanoid = Character and Character:FindFirstChildOfClass("Humanoid")
+                if not Humanoid then return end
+                local previousTool = Character:FindFirstChildOfClass("Tool")
+                local previousToolName = previousTool and previousTool.Name
+                for _, tool in ipairs(drops) do
+                    Humanoid:EquipTool(tool)
+                    task.wait(0.3)
+                    pcall(function() tool:Activate() end)
+                    task.wait(0.3)
+                end
+                -- Hand back whatever was equipped before (usually the farming weapon)
+                if previousToolName then EquipToolByName(previousToolName) end
             end)
         end
     end
@@ -1001,6 +890,7 @@ local function FightMobLoop(mob, runningFlag)
     if not Event then task.wait(1) Character = LocalPlayer.Character Event = FindToolEvent(Character) end
     if not Event then return end
     
+    local equipCheckElapsed = 0
     while runningFlag() do
         local mobAlive = false
         pcall(function() mobAlive = mobHumanoid.Parent and mobHumanoid.Health > 0 end)
@@ -1009,6 +899,18 @@ local function FightMobLoop(mob, runningFlag)
         local myHRP = myChar and myChar:FindFirstChild("HumanoidRootPart")
         local myHum = myChar and myChar:FindFirstChildOfClass("Humanoid")
         if not myChar or not myHRP or not myHum or myHum.Health <= 0 then break end
+        -- The tool can get unequipped mid-fight (game-side quirks, animations, etc);
+        -- re-check periodically instead of only once at the start of the fight.
+        equipCheckElapsed = equipCheckElapsed + 0.15
+        if equipCheckElapsed >= 1 then
+            equipCheckElapsed = 0
+            local equippedTool = myChar:FindFirstChildOfClass("Tool")
+            if not equippedTool or equippedTool.Name ~= selectedFarmingTool then
+                EquipToolByName(selectedFarmingTool)
+                Character = LocalPlayer.Character
+                Event = FindToolEvent(Character) or Event
+            end
+        end
         pcall(function() Event:FireServer("Combat", "Combo") end)
         pcall(function() if mobHRP and mobHRP.Parent then myHRP.CFrame = mobHRP.CFrame * CFrame.new(0, 0, 8) end end)
         task.wait(0.15)
@@ -1033,6 +935,7 @@ local function AutoFarmLoop()
                 if not HRP then continue end
                 task.wait(2) EquipToolByName(selectedFarmingTool) continue
             end
+            EquipToolByName(selectedFarmingTool)
             if isSelectiveFarming and #selectedMobs > 0 then
                 local mob = FindSelectiveTargetMob(selectedMobs)
                 if mob then FightMobLoop(mob, function() return isSelectiveFarming end) else task.wait(1) end
@@ -1135,6 +1038,7 @@ local function RaidFarmLoop()
                 if not HRP then continue end
                 task.wait(2) EquipToolByName(selectedFarmingTool) continue
             end
+            EquipToolByName(selectedFarmingTool)
             local mob = FindAnyRaidMob()
             if mob then FightMobLoop(mob, function() return isRaidFarming end) else task.wait(1) end
         end
@@ -1146,8 +1050,6 @@ end
 --// Custom GUI Setup
 if IsRaidGame then
     UsefulTabButton.Visible = false
-    SessionTabButton.Visible = false
-    MiscTabButton.Visible = false
 end
 
 -- Farming Page
@@ -1183,6 +1085,7 @@ do
     end
 
     CreateToggle(FarmingPage, "Auto Moves", false, function(val) isAutoMoves = val end)
+    CreateToggle(FarmingPage, "Auto Use Drops", false, function(val) isAutoUseDrops = val end)
 
     local statOptions = {"Curse Energy", "Sword", "Defense", "Melee"}
     for _, statName in pairs(statOptions) do
@@ -1207,70 +1110,18 @@ end
 
 -- Useful Page (Main Game Only)
 if IsMainGame then
-    do
-        CreateInput(UsefulPage, "Target Technique:", "", function(val) selectedTechnique = val end)
-        StartToggle = CreateToggle(UsefulPage, "Start Spin Technique", false, function(val) isAutoSpinTechnique = val end)
-        CreateToggle(UsefulPage, "Auto Refill Spins", false, function(val) isAutoRefillSpins = val end)
-        
-        CreateInput(UsefulPage, "Vessel Name:", "", function(val) vesselValue = val end)
-        CreateButton(UsefulPage, "Equip Vessel", function() EquipVessel(vesselValue) end)
-    end
+    CreateInput(UsefulPage, "Target Technique:", "", function(val) selectedTechnique = val end)
+    StartToggle = CreateToggle(UsefulPage, "Start Spin Technique", false, function(val) isAutoSpinTechnique = val end)
+    CreateToggle(UsefulPage, "Auto Refill Spins", false, function(val) isAutoRefillSpins = val end)
 
-    -- Session Page (Main Game Only)
-    do
-        local sLabel = Instance.new("TextLabel")
-        sLabel.Size = UDim2.new(1, 0, 0, 100)
-        sLabel.BackgroundTransparency = 1
-        sLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-        sLabel.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
-        sLabel.TextStrokeTransparency = 0
-        sLabel.Font = Enum.Font.FredokaOne
-        sLabel.TextSize = 16
-        sLabel.TextXAlignment = Enum.TextXAlignment.Left
-        sLabel.TextYAlignment = Enum.TextYAlignment.Top
-        sLabel.Text = "Honor: 0\nMoney: 0\nItems Found:\n- None"
-        sLabel.Parent = SessionPage
-        SessionLabel = sLabel
-    end
-
-    -- Misc Page (Main Game Only)
-    do
-        CreateButton(MiscPage, "Redeem All Codes", function() spawn(RedeemAllCodes) end)
-    end
-
-    -- Session Tracker Hook
-    task.spawn(function()
-        local TextSendingRE = ReplicatedStorage:FindFirstChild("Remotes") and ReplicatedStorage.Remotes:FindFirstChild("TextSendingRE")
-        if not TextSendingRE then
-            local success, remote = pcall(function() return ReplicatedStorage:WaitForChild("Remotes", 60):WaitForChild("TextSendingRE", 60) end)
-            if success then TextSendingRE = remote end
-        end
-        if TextSendingRE then
-            local sessionConn
-            sessionConn = TextSendingRE.OnClientEvent:Connect(function(text, color)
-                if not text then return end
-                local amount = tonumber(string.match(text, "Earn (%d+)"))
-                if amount then
-                    if string.find(string.lower(text), "honor") then sessionHonor = sessionHonor + amount
-                    elseif string.find(string.lower(text), "beli") or string.find(text, "$") then sessionMoney = sessionMoney + amount end
-                else
-                    if string.find(text, "Dropped") or string.find(text, "Found") then
-                        if sessionItemCounts[text] then sessionItemCounts[text] = sessionItemCounts[text] + 1 else sessionItemCounts[text] = 1 end
-                    end
-                end
-                local itemListStr = ""
-                for item, count in pairs(sessionItemCounts) do itemListStr = itemListStr .. "- " .. item .. (count > 1 and " (" .. count .. ")\n" or "\n") end
-                if itemListStr == "" then itemListStr = "- None" end
-                if SessionLabel then SessionLabel.Text = "Honor: " .. sessionHonor .. "\nMoney: " .. sessionMoney .. "\nItems Found:\n" .. itemListStr end
-            end)
-            table.insert(getgenv().AutoFarmHubGlobalConnections, sessionConn)
-        end
-    end)
+    CreateInput(UsefulPage, "Vessel Name:", "", function(val) vesselValue = val end)
+    CreateButton(UsefulPage, "Equip Vessel", function() EquipVessel(vesselValue) end)
 end
 
 --// Start Background Loops
 spawn(PowerSpamLoop)
 spawn(AutoMovesLoop)
+spawn(AutoUseDropsLoop)
 if IsMainGame then
     spawn(MobScannerLoop)
     spawn(AutoSpinTechniqueLoop)
