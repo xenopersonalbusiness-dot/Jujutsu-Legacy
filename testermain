@@ -714,6 +714,55 @@ end
 local function FindTargetMob(targetName) return FindMobByFilter(function(name) return name == targetName end) end
 local function FindSelectiveTargetMob(mobNames) return FindMobByFilter(function(name) return table.find(mobNames, name) ~= nil end) end
 
+-- GetInput is invoked BY THE SERVER (OnClientInvoke), asking the client what code was typed;
+-- it is not something the client calls. We don't need to know *what* tells the server to ask
+-- (a RemoteEvent buried anywhere, with any name) - we just need to trigger the game's own
+-- already-connected handler the same way a real player would: type into the box and submit it.
+-- Firing FocusLost(true) reproduces "typed text, pressed Enter" exactly, running whatever
+-- internal logic the game wired to that box regardless of where its remote lives.
+local function FindRedeemBox(menu)
+    if not menu then return nil end
+    for _, obj in pairs(menu:GetDescendants()) do
+        if obj:IsA("TextBox") then return obj end
+    end
+    return nil
+end
+
+local function FindRedeemButton(menu, box)
+    if not menu then return nil end
+    local searchRoot = (box and box.Parent) or menu
+    for _, obj in pairs(searchRoot:GetDescendants()) do
+        if obj:IsA("TextButton") or obj:IsA("ImageButton") then
+            local label = (obj.Name .. " " .. (obj:IsA("TextButton") and obj.Text or "")):lower()
+            if label:find("redeem") or label:find("submit") or label:find("confirm") or label:find("enter") or label:find("send") or label:find("apply") then
+                return obj
+            end
+        end
+    end
+    return nil
+end
+
+local function FindRedeemRemote(menu)
+    local remotesFolder = ReplicatedStorage:FindFirstChild("Remotes")
+    if remotesFolder then
+        local candidates = {"RedeemCode", "Redeem", "SubmitCode", "CodeRedeem", "EnterCode", "RedeemButton"}
+        for _, name in ipairs(candidates) do
+            local r = remotesFolder:FindFirstChild(name)
+            if r and (r:IsA("RemoteEvent") or r:IsA("RemoteFunction")) then return r end
+        end
+    end
+    -- Also check right next to GetInput - per-menu remotes often live beside it, not centrally
+    if menu then
+        for _, obj in pairs(menu:GetDescendants()) do
+            if (obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction")) and obj.Name ~= "GetInput" then
+                local n = obj.Name:lower()
+                if n:find("redeem") or n:find("code") or n:find("submit") then return obj end
+            end
+        end
+    end
+    return nil
+end
+
 local function RedeemAllCodes()
     local codesModule = ReplicatedStorage:FindFirstChild("Module") and ReplicatedStorage.Module:FindFirstChild("Codes")
     if not codesModule then warn("[AutoFarmHub] Codes module not found at ReplicatedStorage.Module.Codes") return end
@@ -739,16 +788,49 @@ local function RedeemAllCodes()
         end)
         if success then Event = remote end
     end
-    if Event then
-        for _, code in ipairs(codes) do
-            pcall(function()
-                if Event:IsA("RemoteFunction") then Event:InvokeServer(code)
-                elseif Event:IsA("RemoteEvent") then Event:FireServer(code) end
-            end)
-            task.wait(1)
+    if not Event or not Event:IsA("RemoteFunction") then
+        warn("[AutoFarmHub] GetInput RemoteFunction not found at PlayerGui.Profile.Menu")
+        return
+    end
+
+    local box = FindRedeemBox(Menu)
+    local btn = FindRedeemButton(Menu, box)
+    local remote = FindRedeemRemote(Menu)
+    if not box and not btn and not remote then
+        warn("[AutoFarmHub] Could not find the code TextBox, a Redeem/Submit button, or a redeem remote under PlayerGui.Profile.Menu. Use your remote spy on a manual redeem to find what fires right before GetInput.OnClientInvoke gets called, then send me that path.")
+        return
+    end
+    if typeof(firesignal) ~= "function" and not remote then
+        warn("[AutoFarmHub] This executor doesn't expose firesignal and no redeem remote was found - can't simulate submission.")
+        return
+    end
+
+    local hasGetCallback = typeof(getcallbackvalue) == "function"
+    local originalCallback = hasGetCallback and getcallbackvalue(Event, "OnClientInvoke") or nil
+
+    for _, code in ipairs(codes) do
+        Event.OnClientInvoke = function() return code end
+        if box then
+            pcall(function() box.Text = code end)
+            -- Reproduce "typed the code, pressed Enter" - runs the game's own submit handler
+            -- whatever remote it internally fires, wherever that remote actually lives.
+            if typeof(firesignal) == "function" then
+                pcall(function() firesignal(box.FocusLost, true) end)
+            end
         end
-    else
-        warn("[AutoFarmHub] Could not find code redemption remote (PlayerGui.Profile.Menu.GetInput)")
+        if btn and typeof(firesignal) == "function" then
+            pcall(function() firesignal(btn.MouseButton1Click) end)
+        end
+        if remote then
+            pcall(function()
+                if remote:IsA("RemoteEvent") then remote:FireServer() else remote:InvokeServer() end
+            end)
+        end
+        task.wait(1)
+    end
+
+    if hasGetCallback and originalCallback then
+        Event.OnClientInvoke = originalCallback
     end
 end
 
