@@ -677,7 +677,16 @@ local function FindMobByFilter(filterFn)
     return validMobs[1].mob
 end
 
-local function FindTargetMob(targetName) return FindMobByFilter(function(name) return name == targetName end) end
+local function FindTargetMob(targetName)
+    if not targetName or targetName == "" then return nil end
+    local mob = FindMobByFilter(function(name) return name == targetName end)
+    if mob then return mob end
+    local lowerTarget = targetName:lower()
+    return FindMobByFilter(function(name)
+        local lowerName = name:lower()
+        return lowerName:find(lowerTarget, 1, true) ~= nil or lowerTarget:find(lowerName, 1, true) ~= nil
+    end)
+end
 local function FindSelectiveTargetMob(mobNames) return FindMobByFilter(function(name) return table.find(mobNames, name) ~= nil end) end
 
 --// Independent Background Loops
@@ -940,16 +949,24 @@ local function AutoFarmLoop()
             local statsFolder = LocalPlayer:FindFirstChild("Stats")
             local playerLevel = statsFolder and statsFolder:FindFirstChild("Level") and statsFolder.Level.Value or 0
             if playerLevel >= 100 then
-                local areaNpcs = GetAllAreaTeleportNPCs()
-                local tpNPC = GetLevelMatchedAreaTeleportNPC(playerLevel, areaNpcs)
-                local tpPart = tpNPC and (tpNPC:FindFirstChild("HumanoidRootPart") or tpNPC:FindFirstChild("Torso") or tpNPC:FindFirstChildWhichIsA("BasePart", true))
-                if not tpPart then
-                    local quest7 = Workspace:FindFirstChild("QuestGivers") and Workspace.QuestGivers:FindFirstChild("Quest 7")
-                    if quest7 then
-                        tpNPC = quest7
-                        tpPart = quest7:FindFirstChild("HumanoidRootPart") or quest7:FindFirstChild("Torso") or quest7:FindFirstChildWhichIsA("BasePart", true)
-                    end
+                EnsureStreamedAroundPlayer()
+                local npc2 = Workspace:FindFirstChild("Npc2")
+                local npc2Child = npc2 and npc2:GetChildren()[19]
+                local npc2Part = npc2Child and (npc2Child:FindFirstChild("HumanoidRootPart") or npc2Child:FindFirstChild("Torso") or npc2Child:FindFirstChildWhichIsA("BasePart", true))
+                local quest7 = Workspace:FindFirstChild("QuestGivers") and Workspace.QuestGivers:FindFirstChild("Quest 7")
+                local quest7Part = quest7 and (quest7:FindFirstChild("HumanoidRootPart") or quest7:FindFirstChild("Torso") or quest7:FindFirstChildWhichIsA("BasePart", true))
+
+                local tpNPC, tpPart
+                if npc2Part and quest7Part then
+                    local distNpc2 = (HRP.Position - npc2Part.Position).Magnitude
+                    local distQuest7 = (HRP.Position - quest7Part.Position).Magnitude
+                    if distNpc2 <= distQuest7 then tpNPC, tpPart = npc2Child, npc2Part else tpNPC, tpPart = quest7, quest7Part end
+                elseif npc2Part then
+                    tpNPC, tpPart = npc2Child, npc2Part
+                elseif quest7Part then
+                    tpNPC, tpPart = quest7, quest7Part
                 end
+
                 if tpPart then
                     TweenTo(tpPart.CFrame * CFrame.new(0, 0, 3))
                     if not isRunning then break end
