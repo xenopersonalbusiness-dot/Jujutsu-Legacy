@@ -43,7 +43,6 @@ local isSelectiveFarming = false
 local isRaidFarming = false
 local farmLoopActive = false
 local lastPickedStartLevel = 0
-local areaTeleportIndex = 1
 local selectedFarmingTool = "Combat"
 local selectedMobs = {}
 local currentMobOptions = {}
@@ -595,6 +594,14 @@ local function EnsureStreamedAroundPlayer()
     end)
 end
 
+local function GetPivotPart(model)
+    if not model then return nil end
+    local part = model:FindFirstChild("HumanoidRootPart") or model:FindFirstChild("Torso") or model:FindFirstChild("UpperTorso")
+    if part and part:IsA("BasePart") then return part end
+    if model:IsA("Model") and model.PrimaryPart then return model.PrimaryPart end
+    return model:FindFirstChildWhichIsA("BasePart", true)
+end
+
 local function GetAllAreaTeleportNPCs()
     EnsureStreamedAroundPlayer()
     local npcs = {}
@@ -606,6 +613,40 @@ local function GetAllAreaTeleportNPCs()
     end
     table.sort(npcs, function(a, b) return a.Name < b.Name end)
     return npcs
+end
+
+-- any Npc2 entry with a prompt is a viable area transition, plus the level-100 quest giver
+local function GetTeleportCandidates()
+    EnsureStreamedAroundPlayer()
+    local candidates = {}
+    local seen = {}
+    local function add(obj)
+        if obj and not seen[obj] and obj:FindFirstChildWhichIsA("ProximityPrompt", true) then
+            seen[obj] = true
+            table.insert(candidates, obj)
+        end
+    end
+    local npc2 = Workspace:FindFirstChild("Npc2")
+    if npc2 then
+        local children = npc2:GetChildren()
+        add(children[19])
+        for _, child in pairs(children) do add(child) end
+    end
+    local questGivers = Workspace:FindFirstChild("QuestGivers")
+    if questGivers then add(questGivers:FindFirstChild("Quest 7")) end
+    return candidates
+end
+
+local function GetNearestTeleportTarget(position)
+    local bestObj, bestPart, bestDist
+    for _, obj in pairs(GetTeleportCandidates()) do
+        local part = GetPivotPart(obj)
+        if part then
+            local dist = (position - part.Position).Magnitude
+            if not bestDist or dist < bestDist then bestObj, bestPart, bestDist = obj, part, dist end
+        end
+    end
+    return bestObj, bestPart
 end
 
 local function GetLevelMatchedAreaTeleportNPC(playerLevel, npcs)
@@ -659,17 +700,31 @@ local function GetBestQuestInfo()
     return bestMarker, bestStartLevel, bestNPC
 end
 
+local MobContainerNames = {"Enemies", "Monsters", "Mobs", "Boss", "Bosses", "Npcs", "NPCs"}
+
+local function CollectMobs(container, filterFn, out)
+    for _, obj in pairs(container:GetChildren()) do
+        if obj:IsA("Model") and filterFn(obj.Name) then
+            local humanoid = obj:FindFirstChildOfClass("Humanoid")
+            local part = GetPivotPart(obj)
+            if humanoid and part and humanoid.Health > 0 then
+                table.insert(out, {mob = obj, health = humanoid.Health})
+            end
+        end
+    end
+end
+
 local function FindMobByFilter(filterFn)
     EnsureStreamedAroundPlayer()
     local validMobs = {}
-    local enemiesFolder = Workspace:FindFirstChild("Enemies")
-    if enemiesFolder then
-        for _, obj in pairs(enemiesFolder:GetChildren()) do
-            if obj:IsA("Model") and filterFn(obj.Name) then
-                local humanoid = obj:FindFirstChildOfClass("Humanoid")
-                local hrp = obj:FindFirstChild("HumanoidRootPart")
-                if humanoid and hrp and humanoid.Health > 0 then table.insert(validMobs, {mob = obj, health = humanoid.Health}) end
-            end
+    for _, name in ipairs(MobContainerNames) do
+        local folder = Workspace:FindFirstChild(name)
+        if folder then CollectMobs(folder, filterFn, validMobs) end
+    end
+    if #validMobs == 0 then
+        CollectMobs(Workspace, filterFn, validMobs)
+        for _, child in pairs(Workspace:GetChildren()) do
+            if child:IsA("Folder") then CollectMobs(child, filterFn, validMobs) end
         end
     end
     if #validMobs == 0 then return nil end
@@ -926,6 +981,28 @@ end
 local function AutoFarmLoop()
     if farmLoopActive then return end farmLoopActive = true
     pcall(function()
+        local mobMissStreak = 0
+
+        -- used whenever the current area has nothing to do: walks to the nearest
+        -- prompt-bearing transition (area teleporter or the level-100 quest giver)
+        local function GoToNearestTransition(playerLevel)
+            local char = LocalPlayer.Character
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+            if not hrp then task.wait(1) return end
+
+            local targetObj = GetLevelMatchedAreaTeleportNPC(playerLevel, GetAllAreaTeleportNPCs())
+            local targetPart = GetPivotPart(targetObj)
+            if not targetPart then
+                targetObj, targetPart = GetNearestTeleportTarget(hrp.Position)
+            end
+            if not targetPart then task.wait(3) return end
+
+            TweenTo(targetPart.CFrame * CFrame.new(0, 0, 3))
+            if not isRunning then return end
+            local prompt = targetPart:FindFirstChild("ProximityPrompt") or targetObj:FindFirstChildWhichIsA("ProximityPrompt", true)
+            if prompt then fireproximityprompt(prompt) task.wait(5) else task.wait(1) end
+        end
+
         while isRunning or isSelectiveFarming do
             task.wait(0.5)
             if not getgenv().AutoFarmHubRunning then break end
@@ -948,32 +1025,6 @@ local function AutoFarmLoop()
             if not isRunning then continue end
             local statsFolder = LocalPlayer:FindFirstChild("Stats")
             local playerLevel = statsFolder and statsFolder:FindFirstChild("Level") and statsFolder.Level.Value or 0
-            if playerLevel >= 100 then
-                EnsureStreamedAroundPlayer()
-                local npc2 = Workspace:FindFirstChild("Npc2")
-                local npc2Child = npc2 and npc2:GetChildren()[19]
-                local npc2Part = npc2Child and (npc2Child:FindFirstChild("HumanoidRootPart") or npc2Child:FindFirstChild("Torso") or npc2Child:FindFirstChildWhichIsA("BasePart", true))
-                local quest7 = Workspace:FindFirstChild("QuestGivers") and Workspace.QuestGivers:FindFirstChild("Quest 7")
-                local quest7Part = quest7 and (quest7:FindFirstChild("HumanoidRootPart") or quest7:FindFirstChild("Torso") or quest7:FindFirstChildWhichIsA("BasePart", true))
-
-                local tpNPC, tpPart
-                if npc2Part and quest7Part then
-                    local distNpc2 = (HRP.Position - npc2Part.Position).Magnitude
-                    local distQuest7 = (HRP.Position - quest7Part.Position).Magnitude
-                    if distNpc2 <= distQuest7 then tpNPC, tpPart = npc2Child, npc2Part else tpNPC, tpPart = quest7, quest7Part end
-                elseif npc2Part then
-                    tpNPC, tpPart = npc2Child, npc2Part
-                elseif quest7Part then
-                    tpNPC, tpPart = quest7, quest7Part
-                end
-
-                if tpPart then
-                    TweenTo(tpPart.CFrame * CFrame.new(0, 0, 3))
-                    if not isRunning then break end
-                    local tpPrompt = tpPart:FindFirstChild("ProximityPrompt") or tpNPC:FindFirstChildWhichIsA("ProximityPrompt", true)
-                    if tpPrompt then fireproximityprompt(tpPrompt) task.wait(5) continue end
-                end
-            end
             local questFolder = LocalPlayer:FindFirstChild("QuestValue")
             local targetValue = questFolder and questFolder:FindFirstChild("Target")
             local targetName = targetValue and targetValue.Value
@@ -986,41 +1037,37 @@ local function AutoFarmLoop()
             end
             if targetName == "" or not targetName then
                 local targetObj = bestQuestNPC or bestQuestMarker
-                if targetObj then
-                    local targetPart = targetObj:FindFirstChild("HumanoidRootPart") or targetObj:FindFirstChild("Torso") or targetObj:FindFirstChildWhichIsA("BasePart", true)
-                    if targetPart then
-                        local targetCFrame = targetPart.CFrame * CFrame.new(0, 0, 3)
-                        local tweenSuccess = TweenTo(targetCFrame)
-                        if not isRunning then break end
-                        if tweenSuccess then
-                            local attempts = 0
-                            while isRunning and attempts < 15 do
-                                local currentTarget = LocalPlayer:FindFirstChild("QuestValue") and LocalPlayer.QuestValue:FindFirstChild("Target")
-                                if currentTarget and currentTarget.Value ~= "" then lastPickedStartLevel = bestStartLevel break end
-                                if targetPart and HRP then HRP.CFrame = targetPart.CFrame * CFrame.new(0, 0, 0) end
-                                if bestQuestNPC then local prompt = bestQuestNPC:FindFirstChildWhichIsA("ProximityPrompt", true) if prompt and prompt.Enabled then fireproximityprompt(prompt) end end
-                                task.wait(0.3) attempts = attempts + 1
-                            end
+                local targetPart = GetPivotPart(targetObj)
+                if targetPart then
+                    local tweenSuccess = TweenTo(targetPart.CFrame * CFrame.new(0, 0, 3))
+                    if not isRunning then break end
+                    if tweenSuccess then
+                        local attempts = 0
+                        while isRunning and attempts < 15 do
+                            local currentTarget = LocalPlayer:FindFirstChild("QuestValue") and LocalPlayer.QuestValue:FindFirstChild("Target")
+                            if currentTarget and currentTarget.Value ~= "" then lastPickedStartLevel = bestStartLevel break end
+                            if targetPart and HRP then HRP.CFrame = targetPart.CFrame * CFrame.new(0, 0, 0) end
+                            if bestQuestNPC then local prompt = bestQuestNPC:FindFirstChildWhichIsA("ProximityPrompt", true) if prompt and prompt.Enabled then fireproximityprompt(prompt) end end
+                            task.wait(0.3) attempts = attempts + 1
                         end
-                    else task.wait(3) end
+                    end
                 else
-                    local areaNpcs = GetAllAreaTeleportNPCs()
-                    local teleportTarget = GetLevelMatchedAreaTeleportNPC(playerLevel, areaNpcs)
-                    local matchedByLevel = teleportTarget ~= nil
-                    if not teleportTarget and #areaNpcs > 0 then if areaTeleportIndex > #areaNpcs then areaTeleportIndex = 1 end teleportTarget = areaNpcs[areaTeleportIndex] end
-                    if teleportTarget then
-                        local tpPart = teleportTarget:FindFirstChild("HumanoidRootPart") or teleportTarget:FindFirstChild("Torso") or teleportTarget:FindFirstChildWhichIsA("BasePart", true)
-                        if tpPart then
-                            TweenTo(tpPart.CFrame * CFrame.new(0, 0, 3))
-                            if not isRunning then break end
-                            local prompt = tpPart:FindFirstChild("ProximityPrompt") or teleportTarget:FindFirstChildWhichIsA("ProximityPrompt", true)
-                            if prompt then fireproximityprompt(prompt) task.wait(5) if not matchedByLevel then areaTeleportIndex = areaTeleportIndex + 1 end end
-                        else task.wait(3) end
-                    else task.wait(3) end
+                    GoToNearestTransition(playerLevel)
                 end
             else
                 local mob = FindTargetMob(targetName)
-                if mob then FightMobLoop(mob, function() return isRunning end) else task.wait(1) end
+                if mob then
+                    mobMissStreak = 0
+                    FightMobLoop(mob, function() return isRunning end)
+                else
+                    mobMissStreak = mobMissStreak + 1
+                    if mobMissStreak >= 4 then
+                        mobMissStreak = 0
+                        GoToNearestTransition(playerLevel)
+                    else
+                        task.wait(1)
+                    end
+                end
             end
         end
     end)
